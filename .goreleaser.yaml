@@ -1,0 +1,54 @@
+# Minimal GoReleaser config for tsm
+version: 2
+
+project_name: tsm
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: tsm
+    main: .
+    binary: tsm
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: tsm-archive
+    builds: [tsm]
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+checksums:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  draft: false
+  prerelease: auto
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
