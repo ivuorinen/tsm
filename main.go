@@ -24,10 +24,22 @@ import (
 const (
 	appName        = "tsm"
 	defaultTimeout = 6 * time.Second
-	cfgDirName     = "tsm"
-	cfgBaseName    = "config"
 	pageStep       = 5 // PgUp/PgDn step
 )
+
+// ldflags-set at build time by goreleaser or Makefile
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// ---------------- Options ----------------
+
+type Options struct {
+	ConfigPath string
+	Print      bool
+}
 
 // ---------------- Config ----------------
 
@@ -39,7 +51,6 @@ type Config struct {
 }
 
 func defaultExclude() []string {
-	// Common build/vendor/cache dirs across ecosystems
 	return []string{
 		".git", "node_modules", "vendor", "dist", "build", "target", "out", "bin",
 		".cache", ".next", ".nuxt", ".pnpm-store", ".yarn", ".yarn/cache",
@@ -59,8 +70,8 @@ func loadConfig(explicit string) (Config, error) {
 			home, _ := os.UserHomeDir()
 			xdg = filepath.Join(home, ".config")
 		}
-		v.AddConfigPath(filepath.Join(xdg, cfgDirName))
-		v.SetConfigName(cfgBaseName)
+		v.AddConfigPath(filepath.Join(xdg, "tsm"))
+		v.SetConfigName("config")
 	}
 	_ = v.ReadInConfig() // best-effort
 	var cfg Config
@@ -70,7 +81,7 @@ func loadConfig(explicit string) (Config, error) {
 		cfg.Exclude = defaultExclude()
 	}
 	if cfg.MaxDepth == 0 {
-		cfg.MaxDepth = 3 // default per request
+		cfg.MaxDepth = 3
 	}
 	if len(cfg.ScanPaths) == 0 {
 		if home, _ := os.UserHomeDir(); home != "" {
@@ -89,7 +100,7 @@ func xdgConfigPath() (string, error) {
 		}
 		xdg = filepath.Join(home, ".config")
 	}
-	return filepath.Join(xdg, cfgDirName, cfgBaseName+".yaml"), nil
+	return filepath.Join(xdg, "tsm", "config.yaml"), nil
 }
 
 func writeDefaultConfig(w io.Writer) error {
@@ -118,7 +129,7 @@ func writeDefaultConfig(w io.Writer) error {
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "Wrote default config → %s\n", path)
+	_, _ = fmt.Fprintf(w, "Wrote default config → %s\n", path)
 	return nil
 }
 
@@ -167,12 +178,11 @@ func sanitize(base string) string {
 	return out
 }
 
-// sessionNameFromPath builds "<parent>_<base>" to avoid collisions.
-// e.g., /home/u/Code/ivuorinen/a -> "ivuorinen_a"
+// "<parent>_<base>" — /home/u/Code/ivuorinen/a -> "ivuorinen_a"
 func sessionNameFromPath(dir string) string {
 	base := sanitize(filepath.Base(dir))
 	parent := sanitize(filepath.Base(filepath.Dir(dir)))
-	if parent == "" || parent == "." || parent == string(os.PathSeparator) {
+	if parent == "" || parent == "." || parent == string(filepath.Separator) {
 		return base
 	}
 	return parent + "_" + base
@@ -185,21 +195,21 @@ type Shell interface {
 	Run(ctx context.Context, name string, args ...string) error
 }
 
-type ExecShell struct{}
+type execShell struct{}
 
-func (ExecShell) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (execShell) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = os.Environ()
 	return cmd.Output()
 }
-func (ExecShell) Run(ctx context.Context, name string, args ...string) error {
+func (execShell) Run(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = os.Environ()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
-var shell Shell = ExecShell{}
+var shell Shell = execShell{}
 
 func listTmuxSessions(ctx context.Context) []string {
 	out, err := shell.Output(ctx, "tmux", "list-sessions", "-F", "#S")
@@ -238,6 +248,8 @@ func createOrSwitchForDir(ctx context.Context, sess, dir string, inTmux bool) er
 	}
 	return switchToSession(ctx, sess, inTmux)
 }
+
+func isInTmux() bool { return os.Getenv("TMUX") != "" }
 
 // ---------------- Discovery (concurrent) ----------------
 
@@ -321,9 +333,8 @@ func scanGitReposConcurrent(cfg Config) []string {
 	return repos
 }
 
-// ---------------- Simple fuzzy UI ----------------
+// ---------------- Fuzzy UI ----------------
 
-// score: simple subsequence match, higher is better, prefer prefix
 func fuzzyScore(needle, hay string) int {
 	if needle == "" {
 		return 1
@@ -331,7 +342,7 @@ func fuzzyScore(needle, hay string) int {
 	ni, score, streak := 0, 0, 0
 	for i := 0; i < len(hay) && ni < len(needle); i++ {
 		if toLower(hay[i]) == toLower(needle[ni]) {
-			score += 2 + streak // reward streaks
+			score += 2 + streak
 			ni++
 			streak++
 		} else {
@@ -366,8 +377,7 @@ func filterAndRank(items []Item, q string, limit int) []viewItem {
 		if it.Path != "" {
 			key += " " + it.Path
 		}
-		s := fuzzyScore(q, key)
-		if s >= 0 {
+		if s := fuzzyScore(q, key); s >= 0 {
 			out = append(out, viewItem{Item: it, score: s})
 		}
 	}
@@ -383,8 +393,6 @@ func filterAndRank(items []Item, q string, limit int) []viewItem {
 	return out
 }
 
-// Terminal UI: minimal raw-mode UI for live filtering.
-// On Windows, we degrade: read query then print numbered list to select.
 func interactiveSelect(items []Item) (Item, error) {
 	if runtime.GOOS == "windows" {
 		fmt.Println("Query: ")
@@ -403,7 +411,6 @@ func interactiveSelect(items []Item) (Item, error) {
 		return cands[n-1].Item, nil
 	}
 
-	// UNIX: ANSI raw-mode small TUI
 	_, restore, err := enableRawMode()
 	if err != nil {
 		return promptOnce(items)
@@ -416,7 +423,7 @@ func interactiveSelect(items []Item) (Item, error) {
 
 	render := func() {
 		clearScreen()
-		fmt.Printf("tsm — filter (↑/↓, Ctrl-N/P, Enter, Backspace, Ctrl-U clear, Tab preview, Home/End, PgUp/PgDn, Ctrl-C cancel)\n")
+		fmt.Printf("tsm — %s (commit %s) — filter (↑/↓, Ctrl-N/P, Enter, Backspace, Ctrl-U, Tab, Home/End, PgUp/PgDn, Ctrl-C)\n", version, commit)
 		fmt.Printf("> %s\n\n", query)
 		cands := filterAndRank(items, query, 30)
 		if idx >= len(cands) {
@@ -463,50 +470,45 @@ func interactiveSelect(items []Item) (Item, error) {
 				continue
 			}
 			return cands[idx].Item, nil
-		case 21: // Ctrl-U: clear
-			query = ""
-			idx = 0
-		case 9: // Tab: toggle preview
+		case 21: // Ctrl-U
+			query, idx = "", 0
+		case 9: // Tab
 			showPreview = !showPreview
 		case 127, 8: // Backspace
 			if len(query) > 0 {
 				query = query[:len(query)-1]
 			}
-		case 27: // ESC… parse arrow/Home/End/PgUp/PgDn
-			// Expect sequences like: ESC [ A/B (arrows), ESC [ H/F (home/end),
-			// ESC [ 5 ~ (PgUp), ESC [ 6 ~ (PgDn), ESC [ 1 ~ (Home), ESC [ 4 ~ (End)
+		case 27:
 			b1, _ := readKey.ReadByte()
 			if b1 != '[' {
 				break
 			}
 			b2, _ := readKey.ReadByte()
 			switch b2 {
-			case 'A': // up
+			case 'A':
 				idx--
-			case 'B': // down
+			case 'B':
 				idx++
-			case 'H', '1': // Home
+			case 'H', '1':
 				if b2 == '1' {
-					_, _ = readKey.ReadByte() // expect '~'
+					_, _ = readKey.ReadByte()
 				}
 				idx = 0
-			case 'F', '4': // End
+			case 'F', '4':
 				if b2 == '4' {
-					_, _ = readKey.ReadByte() // expect '~'
+					_, _ = readKey.ReadByte()
 				}
-				// set at end after we know candidate count in render
 				cands := filterAndRank(items, query, 30)
 				if len(cands) > 0 {
 					idx = len(cands) - 1
 				}
-			case '5': // PgUp
-				_, _ = readKey.ReadByte() // consume '~'
+			case '5':
+				_, _ = readKey.ReadByte()
 				idx -= pageStep
-			case '6': // PgDn
-				_, _ = readKey.ReadByte() // consume '~'
+			case '6':
+				_, _ = readKey.ReadByte()
 				idx += pageStep
 			default:
-				// consume any trailing '~' if present
 				if b2 >= '0' && b2 <= '9' {
 					_, _ = readKey.ReadByte()
 				}
@@ -516,7 +518,6 @@ func interactiveSelect(items []Item) (Item, error) {
 		case 16: // Ctrl-P
 			idx--
 		default:
-			// printable?
 			if r >= 32 && r <= 126 {
 				query += string(r)
 			}
@@ -542,12 +543,11 @@ func promptOnce(items []Item) (Item, error) {
 	return cands[n-1].Item, nil
 }
 
-// Raw mode helpers (unix)
+// Raw mode via stty (no extra deps)
 func enableRawMode() (bool, func(), error) {
 	if runtime.GOOS == "windows" {
 		return false, func() {}, nil
 	}
-	// very small shim using stty to avoid cgo/term deps
 	cmd := exec.Command("stty", "-g")
 	cmd.Stdin = os.Stdin
 	old, err := cmd.Output()
@@ -567,62 +567,23 @@ func enableRawMode() (bool, func(), error) {
 	return true, restore, nil
 }
 
-func clearScreen() {
-	fmt.Print("\x1b[2J\x1b[H")
-}
+func clearScreen() { fmt.Print("\x1b[2J\x1b[H") }
 
-// ---------------- Main ----------------
+// ---------------- Orchestrator ----------------
 
-func isInTmux() bool { return os.Getenv("TMUX") != "" }
-
-func main() {
-	var (
-		flagCfg     string
-		flagPrint   bool
-		flagInitCfg bool
-	)
-	flag.StringVar(&flagCfg, "config", "", "Explicit config file path")
-	flag.BoolVar(&flagPrint, "print", false, "Print candidates and exit")
-	flag.BoolVar(&flagInitCfg, "init-config", false, "Write default config to XDG path and exit")
-	flag.Parse()
-
-	if flagInitCfg {
-		if err := writeDefaultConfig(os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	cfg, err := loadConfig(flagCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s: config error: %v\n", appName, err)
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancel()
-
-	// Build candidates
+func buildItems(ctx context.Context, cfg Config) []Item {
 	var items []Item
-
-	// Sessions
 	for _, s := range listTmuxSessions(ctx) {
 		items = append(items, Item{Kind: KindSession, Name: s})
 	}
-	// Scan repos concurrently
-	repos := scanGitReposConcurrent(cfg)
-	for _, r := range repos {
+	for _, r := range scanGitReposConcurrent(cfg) {
 		items = append(items, Item{Kind: KindGitRepo, Name: sessionNameFromPath(r), Path: r})
 	}
-	// Bookmarks
 	for _, b := range cfg.Bookmarks {
 		if p, ok := expandPath(b); ok {
 			items = append(items, Item{Kind: KindBookmark, Name: sessionNameFromPath(p), Path: p})
 		}
 	}
-
-	// Dedup: prefer sessions by name; for G/B use (name,path)
 	seen := map[string]struct{}{}
 	var uniq []Item
 	for _, it := range items {
@@ -638,28 +599,80 @@ func main() {
 		seen[key] = struct{}{}
 		uniq = append(uniq, it)
 	}
-	items = uniq
+	return uniq
+}
 
-	if flagPrint {
+func Run(opts Options) error {
+	if opts.Print && opts.ConfigPath == "__init__" {
+		return writeDefaultConfig(os.Stdout)
+	}
+
+	cfg, err := loadConfig(opts.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("%s: config error: %w", appName, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	items := buildItems(ctx, cfg)
+	if opts.Print {
 		for _, it := range items {
 			fmt.Printf("%s\t%s\t%s\n", it.Kind, it.Name, it.Path)
 		}
-		return
+		return nil
 	}
 	if len(items) == 0 {
-		fmt.Fprintln(os.Stderr, "no candidates")
-		return
+		return errors.New("no candidates")
 	}
 
 	selected, err := interactiveSelect(items)
 	if err != nil {
-		return
+		return err
 	}
 	inTmux := isInTmux()
 	switch selected.Kind {
 	case KindSession:
-		_ = switchToSession(ctx, selected.Name, inTmux)
+		return switchToSession(ctx, selected.Name, inTmux)
 	case KindGitRepo, KindBookmark:
-		_ = createOrSwitchForDir(ctx, selected.Name, selected.Path, inTmux)
+		return createOrSwitchForDir(ctx, selected.Name, selected.Path, inTmux)
+	default:
+		return nil
+	}
+}
+
+// ---------------- main() ----------------
+
+func main() {
+	var (
+		flagCfg     string
+		flagPrint   bool
+		flagInitCfg bool
+		flagVersion bool
+	)
+	flag.StringVar(&flagCfg, "config", "", "Explicit config file path")
+	flag.BoolVar(&flagPrint, "print", false, "Print candidates and exit")
+	flag.BoolVar(&flagInitCfg, "init-config", false, "Write default config to XDG path and exit")
+	flag.BoolVar(&flagVersion, "version", false, "Print version and exit")
+	flag.Parse()
+
+	if flagVersion {
+		fmt.Printf("tsm %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+
+	if flagInitCfg {
+		if err := writeDefaultConfig(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := Run(Options{
+		ConfigPath: flagCfg,
+		Print:      flagPrint,
+	}); err != nil && err.Error() != "cancelled" {
+		fmt.Fprintln(os.Stderr, err)
 	}
 }
