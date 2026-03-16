@@ -1,3 +1,4 @@
+// Package main implements tsm, a tmux session manager.
 package main
 
 import (
@@ -292,7 +293,7 @@ func scanGitReposConcurrent(cfg Config) []string {
 		wg.Add(1)
 		go func(root string) {
 			defer wg.Done()
-			filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return nil
 				}

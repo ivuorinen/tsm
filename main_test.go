@@ -16,10 +16,10 @@ type fakeShell struct {
 }
 
 func k(name string, args ...string) string { return name + " " + strings.Join(args, " ") }
-func (f *fakeShell) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (f *fakeShell) Output(_ context.Context, name string, args ...string) ([]byte, error) {
 	return f.out[k(name, args...)], f.err[k(name, args...)]
 }
-func (f *fakeShell) Run(ctx context.Context, name string, args ...string) error {
+func (f *fakeShell) Run(_ context.Context, name string, args ...string) error {
 	return f.err[k(name, args...)]
 }
 
