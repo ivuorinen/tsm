@@ -1,3 +1,4 @@
+// Package main implements tsm, a tmux session manager.
 package main
 
 import (
@@ -149,10 +150,12 @@ type Item struct {
 	Path string // directory for G/B
 }
 
-func sanitize(base string) string {
+// sanitizeRaw converts a directory segment into a tmux-safe name,
+// returning "" when no valid characters remain (no "session" fallback).
+func sanitizeRaw(base string) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
-		return "session"
+		return ""
 	}
 	var b strings.Builder
 	prevDash := false
@@ -171,21 +174,33 @@ func sanitize(base string) string {
 			}
 		}
 	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "session"
+	return strings.Trim(b.String(), "-")
+}
+
+func sanitize(base string) string {
+	if s := sanitizeRaw(base); s != "" {
+		return s
 	}
-	return out
+	return "session"
 }
 
 // "<parent>_<base>" — /home/u/Code/ivuorinen/a -> "ivuorinen_a"
+// Walks up the tree to find the first ancestor whose name has valid characters,
+// skipping segments that are all non-ASCII / special (e.g. "äö!").
 func sessionNameFromPath(dir string) string {
 	base := sanitize(filepath.Base(dir))
-	parent := sanitize(filepath.Base(filepath.Dir(dir)))
-	if parent == "" || parent == "." || parent == string(filepath.Separator) {
-		return base
+	d := dir
+	for {
+		parent := filepath.Dir(d)
+		if parent == d { // reached filesystem root
+			break
+		}
+		d = parent
+		if name := sanitizeRaw(filepath.Base(d)); name != "" {
+			return name + "_" + base
+		}
 	}
-	return parent + "_" + base
+	return base
 }
 
 // ---------------- Tmux shell abstraction ----------------
@@ -292,7 +307,7 @@ func scanGitReposConcurrent(cfg Config) []string {
 		wg.Add(1)
 		go func(root string) {
 			defer wg.Done()
-			filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return nil
 				}
