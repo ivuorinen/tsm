@@ -1,6 +1,6 @@
 module github.com/ivuorinen/tsm
 
-go 1.26.6
+go 1.27.0
 
 require github.com/spf13/viper v1.21.0
 
