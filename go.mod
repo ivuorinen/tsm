@@ -2,7 +2,7 @@ module github.com/ivuorinen/tsm
 
 go 1.25.0
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require github.com/spf13/viper v1.21.0
 
